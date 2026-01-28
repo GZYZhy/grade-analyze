@@ -809,12 +809,20 @@ def render_stats(store: DataStore, class_id: int) -> None:
         threshold = st.number_input("阈值", value=0.0)
 
     exams = df["exam_name"].drop_duplicates().tolist()
-    if len(exams) < 2:
-        st.info("至少需要两次考试数据。")
+    if not exams:
+        st.info("暂无考试数据。")
         return
-    exam_a = st.selectbox("基准考试", exams, index=0)
-    exam_b = st.selectbox("对比考试", exams, index=min(1, len(exams) - 1))
-    exam_single = st.selectbox("选择考试", exams, index=0)
+    exam_a = None
+    exam_b = None
+    exam_single = None
+    if mode == "两次考试对比":
+        if len(exams) < 2:
+            st.info("至少需要两次考试数据。")
+            return
+        exam_a = st.selectbox("基准考试", exams, index=0)
+        exam_b = st.selectbox("对比考试", exams, index=min(1, len(exams) - 1))
+    else:
+        exam_single = st.selectbox("选择考试", exams, index=0)
 
     if subject == "总分":
         base_df = df.drop_duplicates(subset=["student_name", "exam_name", "total_score", "total_raw", "class_rank", "grade_rank"])
