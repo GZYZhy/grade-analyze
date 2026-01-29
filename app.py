@@ -396,11 +396,18 @@ def render_trend_page(store: DataStore, class_id: int) -> None:
     )
 
     total_series = df_display.groupby("exam_name")["total_score"].first()
+    total_raw_series = df_display.groupby("exam_name")["total_raw"].first()
     grade_rank_series = df_display.groupby("exam_name")["grade_rank"].first()
     class_rank_series = df_display.groupby("exam_name")["class_rank"].first()
 
     total_series = total_series.fillna(total_from_subject)
     grade_rank_series = grade_rank_series.fillna(rank_from_subject)
+    total_raw_from_subject = (
+        df_display[df_display["subject"] == "总分"]
+        .groupby("exam_name")["score_raw"]
+        .first()
+    )
+    total_raw_series = total_raw_series.fillna(total_raw_from_subject)
 
     exam_rows = df_display.pivot_table(
         index="exam_name",
@@ -415,6 +422,8 @@ def render_trend_page(store: DataStore, class_id: int) -> None:
         aggfunc="first",
     )
     exam_rows["总分"] = total_series
+    if total_raw_series.notna().any():
+        exam_rows["总分原始"] = total_raw_series
     exam_rows["班级名次"] = class_rank_series
     exam_rows["年级名次"] = grade_rank_series
     if not raw_rows.empty:
@@ -427,14 +436,51 @@ def render_trend_page(store: DataStore, class_id: int) -> None:
         if raw_col_name in exam_rows.columns:
             exam_rows[subject] = exam_rows[raw_col_name]
             exam_rows = exam_rows.drop(columns=[raw_col_name])
+
+    renamed_cols = {}
+    for col in exam_rows.columns:
+        if col.endswith("(原始)"):
+            subject = col.replace("(原始)", "")
+            if subject in exam_rows.columns:
+                renamed_cols[col] = subject
+                renamed_cols[subject] = f"{subject}赋分"
+    if renamed_cols:
+        exam_rows = exam_rows.rename(columns=renamed_cols)
     exam_rows = exam_rows.reset_index()
-    subject_cols = [
-        col
-        for col in exam_rows.columns
-        if col not in ["exam_name", "总分", "班级名次", "年级名次", "总分"]
+    exam_rows = exam_rows.rename(
+        columns={"exam_name": "考试名称", "年级名次": "年级排名", "班级名次": "班级排名"}
+    )
+
+    preferred_subject_order = [
+        "总分原始",
+        "总分",
+        "年级排名",
+        "语文",
+        "数学",
+        "英语",
+        "物理",
+        "历史",
+        "化学",
+        "化学赋分",
+        "生物",
+        "生物赋分",
+        "政治",
+        "政治赋分",
+        "地理",
+        "地理赋分",
     ]
-    exam_rows = exam_rows[["exam_name", "总分", "班级名次", "年级名次", *subject_cols]]
-    exam_rows = exam_rows.rename(columns={"exam_name": "考试名称"})
+
+    ordered_cols = ["考试名称"]
+    for col in preferred_subject_order:
+        if col in exam_rows.columns and col not in ordered_cols:
+            ordered_cols.append(col)
+
+    if "班级排名" in exam_rows.columns and "班级排名" not in ordered_cols:
+        insert_after = ordered_cols.index("年级排名") + 1 if "年级排名" in ordered_cols else len(ordered_cols)
+        ordered_cols.insert(insert_after, "班级排名")
+
+    remaining_cols = [col for col in exam_rows.columns if col not in ordered_cols]
+    exam_rows = exam_rows[ordered_cols + remaining_cols]
 
     all_subjects = sorted([apply_subject_alias(s, aliases) for s in store.list_subjects(class_id) if s != "总分"])
     series_options_all = ["总分"] + list(dict.fromkeys(all_subjects))
@@ -499,8 +545,7 @@ def render_trend_page(store: DataStore, class_id: int) -> None:
         display_series = ["总分"] if "总分" in series_options else series_options[:1]
 
     with tab_table:
-        with st.expander("展开查看表格", expanded=False):
-            st.dataframe(exam_rows, height=360)
+        st.dataframe(exam_rows, height=360, hide_index=True)
 
     with tab_chart:
         selected_series = display_series
@@ -552,7 +597,6 @@ def render_trend_page(store: DataStore, class_id: int) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
     with tab_settings:
-        st.checkbox("紧凑展示", value=True, key="trend_compact")
         st.selectbox("图表指标", ["赋分", "原始", "名次"], key="trend_metric")
         st.multiselect("图表显示内容", series_options_all, default=selected_all, key="trend_series")
         if st.session_state.get("trend_metric") == "名次" and "总分" in st.session_state.get("trend_series", ["总分"]):
