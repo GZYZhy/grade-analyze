@@ -13,6 +13,8 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
+import os
+import tempfile
 
 from analysis import build_student_trend
 from data_access import DataStore
@@ -57,6 +59,21 @@ def to_dataframe(rows: Sequence[object]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame([dict(row) for row in rows])
+
+
+def _detect_excel_format(path: str) -> Optional[str]:
+    """Detect basic excel file type by header bytes. Returns 'xls' or 'xlsx' or None."""
+    try:
+        with open(path, "rb") as f:
+            hdr = f.read(8)
+        if hdr.startswith(b"PK"):
+            return "xlsx"
+        # OLE Compound File header for old xls
+        if hdr.startswith(b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1"):
+            return "xls"
+    except Exception:
+        return None
+    return None
 
 
 def apply_exam_order(df: pd.DataFrame, store: DataStore, class_id: int) -> pd.DataFrame:
@@ -161,21 +178,69 @@ def select_class(store: DataStore) -> int:
 def import_input_sheet(store: DataStore, class_id: int) -> None:
     st.subheader("输入成绩单导入")
     aliases = load_subject_aliases(store)
-    # allow user to download a sample input sheet from the bundled samples directory
     samples_dir = Path(__file__).resolve().parent / "samples"
     sample_input = samples_dir / "输入成绩单.xlsx"
     if sample_input.exists():
         with open(sample_input, "rb") as f:
             st.download_button("下载：输入成绩单样例", f, file_name=sample_input.name)
 
-    # accept both .xlsx and .xls formats
     upload = st.file_uploader("上传输入成绩单（Excel，.xlsx 或 .xls）", type=["xlsx", "xls"])
     if not upload:
         return
-    xls = pd.ExcelFile(upload)
-    sheet_name = st.selectbox("选择工作表", xls.sheet_names, index=0)
-    df = pd.read_excel(upload, sheet_name=sheet_name)
-    st.write("预览", df.head(10))
+
+    # reject macro-enabled formats by extension
+    ext = Path(getattr(upload, "name", "")).suffix.lower()
+    if ext in (".xlsm", ".xlsb"):
+        st.error("不接受含宏的 Excel 文件（.xlsm / .xlsb）。请另存为 .xlsx 或 .xls 后重试。")
+        return
+
+    # size check
+    max_mb = int(os.environ.get("MAX_UPLOAD_MB", "10"))
+    size_bytes = getattr(upload, "size", None)
+    if size_bytes is None:
+        try:
+            size_bytes = len(upload.getbuffer())
+        except Exception:
+            try:
+                data = upload.read()
+                size_bytes = len(data)
+            except Exception:
+                size_bytes = None
+    if size_bytes and size_bytes > max_mb * 1024 * 1024:
+        st.error(f"上传文件过大，最大允许 {max_mb} MB。")
+        return
+
+    # write to temp file and read
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext or ".xlsx") as tmp:
+            try:
+                tmp.write(upload.getbuffer())
+            except Exception:
+                upload.seek(0)
+                tmp.write(upload.read())
+            tmp_path = tmp.name
+
+        fmt = _detect_excel_format(tmp_path)
+        if fmt not in ("xls", "xlsx"):
+            st.error("无法识别上传文件的 Excel 格式，上传失败。")
+            return
+
+        try:
+            xls = pd.ExcelFile(tmp_path)
+            sheet_name = st.selectbox("选择工作表", xls.sheet_names, index=0)
+            df = pd.read_excel(tmp_path, sheet_name=sheet_name)
+            st.write("预览", df.head(10))
+        except Exception as e:
+            st.error("读取 Excel 文件失败，请确认文件有效且环境已安装必要的解析依赖（.xls 可能需要 xlrd，.xlsx 需要 openpyxl）。\n错误：%s" % str(e))
+            return
+    finally:
+        # cleanup temp file
+        if tmp_path and Path(tmp_path).exists():
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
     columns = [str(c).strip() for c in df.columns]
     mapping = {
@@ -258,14 +323,56 @@ def import_usual_sheet(store: DataStore, class_id: int) -> None:
     upload = st.file_uploader("上传通常成绩单（Excel，.xlsx 或 .xls）", type=["xlsx", "xls"], key="usual")
     if not upload:
         return
-    xls = pd.ExcelFile(upload)
-    sheet_name = st.selectbox("选择工作表", xls.sheet_names, index=0, key="usual_sheet")
-    use_second_row = st.checkbox("第一行是表头说明，映射从第二行开始", value=False)
-    header_row = 1 if use_second_row else 0
-    df = pd.read_excel(upload, sheet_name=sheet_name, header=header_row)
-    st.write("预览", df.head(10))
 
-    exam_name = st.text_input("考试名称", value=sheet_name)
+    # similar robust upload handling as input sheet: temp file, size/extension checks
+    ext = Path(getattr(upload, "name", "")).suffix.lower()
+    if ext in (".xlsm", ".xlsb"):
+        st.error("不接受含宏的 Excel 文件（.xlsm / .xlsb）。请另存为 .xlsx 或 .xls 后重试。")
+        return
+
+    max_mb = int(os.environ.get("MAX_UPLOAD_MB", "10"))
+    size_bytes = getattr(upload, "size", None)
+    if size_bytes is None:
+        try:
+            size_bytes = len(upload.getbuffer())
+        except Exception:
+            try:
+                data = upload.read()
+                size_bytes = len(data)
+            except Exception:
+                size_bytes = None
+    if size_bytes and size_bytes > max_mb * 1024 * 1024:
+        st.error(f"上传文件过大，最大允许 {max_mb} MB。")
+        return
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext or ".xlsx") as tmp:
+            try:
+                tmp.write(upload.getbuffer())
+            except Exception:
+                upload.seek(0)
+                tmp.write(upload.read())
+            tmp_path = tmp.name
+
+        fmt = _detect_excel_format(tmp_path)
+        if fmt not in ("xls", "xlsx"):
+            st.error("无法识别上传文件的 Excel 格式，上传失败。")
+            return
+
+        xls = pd.ExcelFile(tmp_path)
+        sheet_name = st.selectbox("选择工作表", xls.sheet_names, index=0, key="usual_sheet")
+        use_second_row = st.checkbox("第一行是表头说明，映射从第二行开始", value=False)
+        header_row = 1 if use_second_row else 0
+        df = pd.read_excel(tmp_path, sheet_name=sheet_name, header=header_row)
+        st.write("预览", df.head(10))
+        exam_name = st.text_input("考试名称", value=sheet_name)
+    finally:
+        if tmp_path and Path(tmp_path).exists():
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
     columns = [str(c).strip() for c in df.columns]
     mapping = {
         "student_name": st.selectbox(
@@ -492,40 +599,6 @@ def render_trend_page(store: DataStore, class_id: int) -> None:
     if renamed_cols:
         exam_rows = exam_rows.rename(columns=renamed_cols)
     exam_rows = exam_rows.reset_index()
-    exam_rows = exam_rows.rename(
-        columns={"exam_name": "考试名称", "年级名次": "年级排名", "班级名次": "班级排名"}
-    )
-
-    preferred_subject_order = [
-        "总分原始",
-        "总分",
-        "年级排名",
-        "语文",
-        "数学",
-        "英语",
-        "物理",
-        "历史",
-        "化学",
-        "化学赋分",
-        "生物",
-        "生物赋分",
-        "政治",
-        "政治赋分",
-        "地理",
-        "地理赋分",
-    ]
-
-    ordered_cols = ["考试名称"]
-    for col in preferred_subject_order:
-        if col in exam_rows.columns and col not in ordered_cols:
-            ordered_cols.append(col)
-
-    if "班级排名" in exam_rows.columns and "班级排名" not in ordered_cols:
-        insert_after = ordered_cols.index("年级排名") + 1 if "年级排名" in ordered_cols else len(ordered_cols)
-        ordered_cols.insert(insert_after, "班级排名")
-
-    remaining_cols = [col for col in exam_rows.columns if col not in ordered_cols]
-    exam_rows = exam_rows[ordered_cols + remaining_cols]
 
     all_subjects = sorted([apply_subject_alias(s, aliases) for s in store.list_subjects(class_id) if s != "总分"])
     series_options_all = ["总分"] + list(dict.fromkeys(all_subjects))
