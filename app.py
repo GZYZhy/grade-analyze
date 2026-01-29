@@ -58,6 +58,23 @@ def to_dataframe(rows: List[object]) -> pd.DataFrame:
     return pd.DataFrame([dict(row) for row in rows])
 
 
+def apply_exam_order(df: pd.DataFrame, store: DataStore, class_id: int) -> pd.DataFrame:
+    """Apply user-configured exam order to df by making exam_name categorical.
+
+    Exams configured in DataStore.get_exams(class_id) are placed first in that order; any
+    remaining exam names present in df are appended in their current appearance order.
+    """
+    if df.empty:
+        return df
+    configured_exams = [e.name for e in store.get_exams(class_id)]
+    df_exam_names = list(dict.fromkeys(df["exam_name"].astype(str).tolist()))
+    remaining = [n for n in df_exam_names if n not in configured_exams]
+    categories = configured_exams + remaining
+    if categories:
+        df["exam_name"] = pd.Categorical(df["exam_name"].astype(str), categories=categories, ordered=True)
+    return df
+
+
 def pick_index(options: List[str], preferred: str, fallback: int = 0) -> int:
     try:
         return options.index(preferred)
@@ -377,11 +394,22 @@ def render_trend_page(store: DataStore, class_id: int) -> None:
 
     df["subject"] = df["subject"].apply(lambda s: apply_subject_alias(s, aliases))
     df = normalize_forced_subjects(df)
+
+    # Ensure exam order follows user-configured order (order_index) from DataStore.
+    configured_exams = [e.name for e in store.get_exams(class_id)]
+    # keep any exams present in df but not in configured_exams at the end, preserving their appearance order
+    df_exam_names = list(dict.fromkeys(df["exam_name"].astype(str).tolist()))
+    remaining = [n for n in df_exam_names if n not in configured_exams]
+    categories = configured_exams + remaining
+    if categories:
+        df["exam_name"] = pd.Categorical(df["exam_name"].astype(str), categories=categories, ordered=True)
+
     trend = build_student_trend(df)
 
     tab_chart, tab_table, tab_settings = st.tabs(["图表", "表格", "设置"])
 
     df_display = df.copy()
+    # sort by exam order (categorical) then subject
     df_display = df_display.sort_values(by=["exam_name", "subject"]).reset_index(drop=True)
 
     total_from_subject = (
@@ -630,7 +658,7 @@ def render_report_export(store: DataStore, class_id: int) -> None:
         exams_map: Dict[str, List[str]] = {}
         for student in target_students:
             rows = store.get_scores_by_student(student.id)
-            df = to_dataframe(rows)
+            df = apply_exam_order(to_dataframe(rows), store, class_id)
             if df.empty:
                 continue
             df["subject"] = df["subject"].apply(lambda s: apply_subject_alias(s, aliases))
@@ -725,7 +753,7 @@ def render_compare(store: DataStore, class_id: int) -> None:
 
     mode = st.radio("对比模式", ["历次成绩", "单次考试"])
     rows = store.get_scores_for_students([s.id for s in students if s.name in selected])
-    df = to_dataframe(rows)
+    df = apply_exam_order(to_dataframe(rows), store, class_id)
     if df.empty:
         st.info("暂无数据。")
         return
@@ -826,7 +854,7 @@ def render_stats(store: DataStore, class_id: int) -> None:
         rows = store.get_scores_for_students([s.id for s in store.get_students(class_id)])
     else:
         rows = store.get_all_scores()
-    df = to_dataframe(rows)
+    df = apply_exam_order(to_dataframe(rows), store, class_id)
     if df.empty:
         st.info("暂无数据。")
         return
@@ -951,7 +979,7 @@ def render_stats(store: DataStore, class_id: int) -> None:
 def render_overall_stats(store: DataStore, class_id: int) -> None:
     st.subheader("整体数据")
     rows = store.get_scores_for_students([s.id for s in store.get_students(class_id)])
-    df = to_dataframe(rows)
+    df = apply_exam_order(to_dataframe(rows), store, class_id)
     if df.empty:
         st.info("暂无数据。")
         return
@@ -1030,12 +1058,54 @@ def render_data_manage(store: DataStore, class_id: int) -> None:
                 store.delete_exam(e.id)
                 st.rerun()
 
+    # 考试顺序配置
+    st.markdown("**考试顺序配置（上移/下移后点击保存）**")
+    order_key = f"exam_order_{class_id}"
+    if order_key not in st.session_state:
+        st.session_state[order_key] = [e.id for e in exams]
+
+    # display current order with up/down buttons
+    current_order = st.session_state[order_key]
+    # build map id->name for display
+    exam_map = {e.id: e.name for e in exams}
+    for idx, eid in enumerate(current_order):
+        name = exam_map.get(eid, f"(已删除:{eid})")
+        c1, c2, c3 = st.columns([6, 1, 1])
+        with c1:
+            st.write(f"{idx+1}. {name}")
+        with c2:
+            if st.button("上移", key=f"move_up_{eid}"):
+                if idx > 0:
+                    current_order[idx - 1], current_order[idx] = current_order[idx], current_order[idx - 1]
+                    st.session_state[order_key] = current_order
+                    st.rerun()
+        with c3:
+            if st.button("下移", key=f"move_down_{eid}"):
+                if idx < len(current_order) - 1:
+                    current_order[idx + 1], current_order[idx] = current_order[idx], current_order[idx + 1]
+                    st.session_state[order_key] = current_order
+                    st.rerun()
+
+    col_save, col_reset = st.columns([1, 1])
+    with col_save:
+        if st.button("保存考试顺序"):
+            # persist
+            store.reorder_exams(class_id, st.session_state[order_key])
+            st.success("考试顺序已保存。")
+            st.rerun()
+    with col_reset:
+        if st.button("重置为创建顺序"):
+            created = store.get_exams_by_created(class_id)
+            st.session_state[order_key] = [e.id for e in created]
+            st.success("已重置（按创建时间）。")
+            st.rerun()
+
     st.markdown("**手动修正成绩**")
     if students:
         selected = st.selectbox("选择学生", [s.name for s in students])
         student = next(s for s in students if s.name == selected)
         rows = store.get_scores_by_student(student.id)
-        df = to_dataframe(rows)
+        df = apply_exam_order(to_dataframe(rows), store, class_id)
         if not df.empty:
             edit_df = df[["id", "exam_name", "subject", "score", "score_raw", "rank", "total_score", "total_raw", "class_rank", "grade_rank"]]
             edited = st.data_editor(edit_df, num_rows="fixed")

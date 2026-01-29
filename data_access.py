@@ -24,6 +24,7 @@ class ExamItem:
     id: int
     name: str
     class_id: int
+    order_index: int | None = None
 
 
 class DataStore:
@@ -59,6 +60,7 @@ class DataStore:
                     name TEXT NOT NULL,
                     class_id INTEGER NOT NULL,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    order_index INTEGER,
                     UNIQUE(name, class_id),
                     FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE
                 );
@@ -88,6 +90,10 @@ class DataStore:
             columns = [row["name"] for row in conn.execute("PRAGMA table_info(scores)").fetchall()]
             if "score_raw" not in columns:
                 conn.execute("ALTER TABLE scores ADD COLUMN score_raw REAL")
+            # Ensure exams has order_index column for custom ordering
+            exam_cols = [row["name"] for row in conn.execute("PRAGMA table_info(exams)").fetchall()]
+            if "order_index" not in exam_cols:
+                conn.execute("ALTER TABLE exams ADD COLUMN order_index INTEGER")
 
     def get_classes(self) -> List[ClassItem]:
         with self._connect() as conn:
@@ -111,10 +117,34 @@ class DataStore:
     def get_exams(self, class_id: int) -> List[ExamItem]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, name, class_id FROM exams WHERE class_id=? ORDER BY created_at",
+                "SELECT id, name, class_id, order_index FROM exams WHERE class_id=? ORDER BY COALESCE(order_index, created_at), created_at",
                 (class_id,),
             ).fetchall()
-        return [ExamItem(id=row["id"], name=row["name"], class_id=row["class_id"]) for row in rows]
+        return [
+            ExamItem(
+                id=row["id"],
+                name=row["name"],
+                class_id=row["class_id"],
+                order_index=(row["order_index"] if "order_index" in row.keys() else None),
+            )
+            for row in rows
+        ]
+
+    def get_exams_by_created(self, class_id: int) -> List[ExamItem]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, name, class_id, order_index FROM exams WHERE class_id=? ORDER BY created_at",
+                (class_id,),
+            ).fetchall()
+        return [
+            ExamItem(
+                id=row["id"],
+                name=row["name"],
+                class_id=row["class_id"],
+                order_index=(row["order_index"] if "order_index" in row.keys() else None),
+            )
+            for row in rows
+        ]
 
     def upsert_student(self, name: str, class_id: int) -> StudentItem:
         with self._connect() as conn:
@@ -174,7 +204,7 @@ class DataStore:
                 FROM scores s
                 JOIN exams e ON s.exam_id = e.id
                 WHERE s.student_id=?
-                ORDER BY e.created_at
+                ORDER BY CASE WHEN e.order_index IS NULL THEN 1 ELSE 0 END, e.order_index, e.created_at
                 """,
                 (student_id,),
             ).fetchall()
@@ -192,7 +222,7 @@ class DataStore:
                 JOIN exams e ON s.exam_id = e.id
                 JOIN students st ON s.student_id = st.id
                 WHERE s.student_id IN ({placeholders})
-                ORDER BY e.created_at
+                ORDER BY CASE WHEN e.order_index IS NULL THEN 1 ELSE 0 END, e.order_index, e.created_at
                 """,
                 student_ids,
             ).fetchall()
@@ -201,6 +231,12 @@ class DataStore:
     def delete_exam(self, exam_id: int) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM exams WHERE id=?", (exam_id,))
+
+    def reorder_exams(self, class_id: int, ordered_exam_ids: List[int]) -> None:
+        """Set exam order for the given class according to ordered_exam_ids list."""
+        with self._connect() as conn:
+            for idx, eid in enumerate(ordered_exam_ids):
+                conn.execute("UPDATE exams SET order_index=? WHERE id=? AND class_id=?", (idx, eid, class_id))
 
     def delete_student(self, student_id: int) -> None:
         with self._connect() as conn:
@@ -297,7 +333,7 @@ class DataStore:
                 FROM scores s
                 JOIN exams e ON s.exam_id = e.id
                 JOIN students st ON s.student_id = st.id
-                ORDER BY e.created_at
+                ORDER BY CASE WHEN e.order_index IS NULL THEN 1 ELSE 0 END, e.order_index, e.created_at
                 """
             ).fetchall()
         return rows
