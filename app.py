@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+import time
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Sequence
 
 import bcrypt
 import pandas as pd
@@ -21,7 +22,7 @@ from reporting import export_student_reports, export_stats_excel
 FORCED_RAW_SUBJECTS = {"语文", "数学", "英语", "物理", "历史"}
 
 APP_NAME = "成绩分析工具"
-APP_VERSION = "1.0"
+APP_VERSION = "1.2"
 APP_AUTHOR = "公子语"
 APP_COPYRIGHT = "(c) 2026 ZhangWeb"
 
@@ -52,7 +53,7 @@ def init_page() -> None:
     )
 
 
-def to_dataframe(rows: List[object]) -> pd.DataFrame:
+def to_dataframe(rows: Sequence[object]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame([dict(row) for row in rows])
@@ -160,7 +161,15 @@ def select_class(store: DataStore) -> int:
 def import_input_sheet(store: DataStore, class_id: int) -> None:
     st.subheader("输入成绩单导入")
     aliases = load_subject_aliases(store)
-    upload = st.file_uploader("上传输入成绩单（Excel）", type=["xlsx"])
+    # allow user to download a sample input sheet from the bundled samples directory
+    samples_dir = Path(__file__).resolve().parent / "samples"
+    sample_input = samples_dir / "输入成绩单.xlsx"
+    if sample_input.exists():
+        with open(sample_input, "rb") as f:
+            st.download_button("下载：输入成绩单样例", f, file_name=sample_input.name)
+
+    # accept both .xlsx and .xls formats
+    upload = st.file_uploader("上传输入成绩单（Excel，.xlsx 或 .xls）", type=["xlsx", "xls"])
     if not upload:
         return
     xls = pd.ExcelFile(upload)
@@ -238,7 +247,15 @@ def import_input_sheet(store: DataStore, class_id: int) -> None:
 def import_usual_sheet(store: DataStore, class_id: int) -> None:
     st.subheader("通常成绩单导入")
     aliases = load_subject_aliases(store)
-    upload = st.file_uploader("上传通常成绩单（Excel）", type=["xlsx"], key="usual")
+    # allow user to download a sample usual sheet from the bundled samples directory
+    samples_dir = Path(__file__).resolve().parent / "samples"
+    sample_usual = samples_dir / "通常成绩单.xlsx"
+    if sample_usual.exists():
+        with open(sample_usual, "rb") as f:
+            st.download_button("下载：通常成绩单样例", f, file_name=sample_usual.name)
+
+    # accept both .xlsx and .xls formats
+    upload = st.file_uploader("上传通常成绩单（Excel，.xlsx 或 .xls）", type=["xlsx", "xls"], key="usual")
     if not upload:
         return
     xls = pd.ExcelFile(upload)
@@ -951,7 +968,26 @@ def render_stats(store: DataStore, class_id: int) -> None:
             line_value = result_source["值"].quantile(1 - percentile / 100)
         st.info(f"百分位线：{line_value:.2f}")
 
-    st.dataframe(result)
+    # Prepare a display copy: sort results for numbering, rename student_name -> 姓名 and add a continuous 序号 column
+    # Default sorting: 两次考试对比 按 "变化" 从大到小；单次考试按 "值" 从大到小
+    if mode == "两次考试对比" and "变化" in result.columns:
+        sorted_df = result.sort_values(by=["变化"], ascending=False).reset_index(drop=True).copy()
+    elif "值" in result.columns:
+        sorted_df = result.sort_values(by=["值"], ascending=False).reset_index(drop=True).copy()
+    else:
+        sorted_df = result.reset_index(drop=True).copy()
+
+    show_df = sorted_df
+    # add continuous row number starting from 1
+    show_df.insert(0, "序号", range(1, len(show_df) + 1))
+    rename_map = {}
+    if "student_name" in show_df.columns:
+        rename_map["student_name"] = "姓名"
+    if "exam_name" in show_df.columns:
+        rename_map["exam_name"] = "考试"
+    if rename_map:
+        show_df = show_df.rename(columns=rename_map)
+    st.dataframe(show_df, hide_index=True)
 
     if st.button("导出统计为Excel"):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1016,7 +1052,7 @@ def render_overall_stats(store: DataStore, class_id: int) -> None:
         "方差": values.var(),
     }
     stats_df = pd.DataFrame([stats])
-    st.dataframe(stats_df)
+    st.dataframe(stats_df, hide_index=True)
 
     min_val = values.min()
     max_val = values.max()
@@ -1036,92 +1072,188 @@ def render_overall_stats(store: DataStore, class_id: int) -> None:
 
 def render_data_manage(store: DataStore, class_id: int) -> None:
     st.subheader("数据管理")
-    st.markdown("**学生列表**")
-    students = store.get_students(class_id)
-    for s in students:
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.write(s.name)
-        with col2:
-            if st.button("删除", key=f"del_student_{s.id}"):
-                store.delete_student(s.id)
-                st.rerun()
-
     st.markdown("**考试列表**")
     exams = store.get_exams(class_id)
-    for e in exams:
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.write(e.name)
-        with col2:
-            if st.button("删除", key=f"del_exam_{e.id}"):
-                store.delete_exam(e.id)
-                st.rerun()
 
-    # 考试顺序配置
-    st.markdown("**考试顺序配置（上移/下移后点击保存）**")
+    # prepare order state
     order_key = f"exam_order_{class_id}"
     if order_key not in st.session_state:
         st.session_state[order_key] = [e.id for e in exams]
-
-    # display current order with up/down buttons
     current_order = st.session_state[order_key]
-    # build map id->name for display
     exam_map = {e.id: e.name for e in exams}
-    for idx, eid in enumerate(current_order):
-        name = exam_map.get(eid, f"(已删除:{eid})")
-        c1, c2, c3 = st.columns([6, 1, 1])
-        with c1:
-            st.write(f"{idx+1}. {name}")
-        with c2:
-            if st.button("上移", key=f"move_up_{eid}"):
-                if idx > 0:
-                    current_order[idx - 1], current_order[idx] = current_order[idx], current_order[idx - 1]
-                    st.session_state[order_key] = current_order
-                    st.rerun()
-        with c3:
-            if st.button("下移", key=f"move_down_{eid}"):
-                if idx < len(current_order) - 1:
-                    current_order[idx + 1], current_order[idx] = current_order[idx], current_order[idx + 1]
-                    st.session_state[order_key] = current_order
-                    st.rerun()
 
-    col_save, col_reset = st.columns([1, 1])
-    with col_save:
-        if st.button("保存考试顺序"):
-            # persist
-            store.reorder_exams(class_id, st.session_state[order_key])
-            st.success("考试顺序已保存。")
-            st.rerun()
-    with col_reset:
-        if st.button("重置为创建顺序"):
-            created = store.get_exams_by_created(class_id)
-            st.session_state[order_key] = [e.id for e in created]
-            st.success("已重置（按创建时间）。")
-            st.rerun()
+    for idx, e in enumerate(exams):
+        # show each exam with up/down/delete actions (order modified in session_state)
+        c_name, c_up, c_down, c_del = st.columns([4, 1, 1, 1])
+        with c_name:
+            # show current session order index if available for clarity
+            try:
+                pos = st.session_state[order_key].index(e.id) + 1
+                # highlight if recently saved
+                highlight = False
+                saved = st.session_state.get("last_saved_order")
+                saved_time = st.session_state.get("last_saved_time")
+                if saved and saved_time and time.time() - saved_time < 10:
+                    try:
+                        saved_pos = saved.index(e.id) + 1
+                        if saved_pos == pos:
+                            highlight = True
+                    except Exception:
+                        highlight = False
+                if highlight:
+                    st.markdown(f"<div style='background:#e6f0ff;padding:6px;border-radius:4px'>{pos}. {e.name}</div>", unsafe_allow_html=True)
+                else:
+                    st.write(f"{pos}. {e.name}")
+            except Exception:
+                st.write(e.name)
+        with c_up:
+            if st.button("上移", key=f"exam_move_up_{e.id}"):
+                # find position in current_order and swap
+                if e.id in current_order:
+                    pos = current_order.index(e.id)
+                    if pos > 0:
+                        current_order[pos - 1], current_order[pos] = current_order[pos], current_order[pos - 1]
+                        st.session_state[order_key] = current_order
+                        # persist immediately
+                        store.reorder_exams(class_id, st.session_state[order_key])
+                        st.session_state["last_saved_order"] = list(st.session_state[order_key])
+                        st.session_state["last_saved_time"] = time.time()
+                        st.success("考试顺序已保存。")
+                        st.rerun()
+        with c_down:
+            if st.button("下移", key=f"exam_move_down_{e.id}"):
+                if e.id in current_order:
+                    pos = current_order.index(e.id)
+                    if pos < len(current_order) - 1:
+                        current_order[pos + 1], current_order[pos] = current_order[pos], current_order[pos + 1]
+                        st.session_state[order_key] = current_order
+                        # persist immediately
+                        store.reorder_exams(class_id, st.session_state[order_key])
+                        st.session_state["last_saved_order"] = list(st.session_state[order_key])
+                        st.session_state["last_saved_time"] = time.time()
+                        st.success("考试顺序已保存。")
+                        st.rerun()
+        with c_del:
+            if st.button("删除", key=f"del_exam_{e.id}"):
+                store.delete_exam(e.id)
+                # remove from order state if present
+                if e.id in st.session_state.get(order_key, []):
+                    lst = st.session_state[order_key]
+                    lst = [i for i in lst if i != e.id]
+                    st.session_state[order_key] = lst
+                    # persist new order
+                    store.reorder_exams(class_id, st.session_state[order_key])
+                    st.session_state["last_saved_order"] = list(st.session_state[order_key])
+                    st.session_state["last_saved_time"] = time.time()
+                st.rerun()
 
-    st.markdown("**手动修正成绩**")
-    if students:
-        selected = st.selectbox("选择学生", [s.name for s in students])
-        student = next(s for s in students if s.name == selected)
-        rows = store.get_scores_by_student(student.id)
-        df = apply_exam_order(to_dataframe(rows), store, class_id)
-        if not df.empty:
-            edit_df = df[["id", "exam_name", "subject", "score", "score_raw", "rank", "total_score", "total_raw", "class_rank", "grade_rank"]]
-            edited = st.data_editor(edit_df, num_rows="fixed")
-            if st.button("保存修改"):
-                for _, row in edited.iterrows():
-                    store.update_score_item(
-                        int(row["id"]),
-                        float(row["score"]) if pd.notna(row["score"]) else None,
-                        float(row["score_raw"]) if pd.notna(row["score_raw"]) else None,
-                        int(row["rank"]) if pd.notna(row["rank"]) else None,
-                        float(row["total_score"]) if pd.notna(row["total_score"]) else None,
-                        float(row["total_raw"]) if pd.notna(row["total_raw"]) else None,
-                        int(row["grade_rank"]) if pd.notna(row["grade_rank"]) else None,
-                        int(row["class_rank"]) if pd.notna(row["class_rank"]) else None,
-                    )
-                st.success("已保存。")
+    st.markdown("**学生列表**")
+    students = store.get_students(class_id)
+    for s in students:
+        col1, col2, col3 = st.columns([4, 1, 1])
+        with col1:
+            st.write(s.name)
+        with col2:
+            if st.button("修正成绩", key=f"edit_student_{s.id}"):
+                st.session_state["data_manage_edit_student"] = s.id
+                st.rerun()
+        with col3:
+            if st.button("删除", key=f"del_student_{s.id}"):
+                store.delete_student(s.id)
+                # clear edit target if deleted
+                if st.session_state.get("data_manage_edit_student") == s.id:
+                    st.session_state.pop("data_manage_edit_student", None)
+                st.rerun()
+
+    # Inline edit for a selected student (triggered by each student's "修正成绩" button)
+    edit_target = st.session_state.get("data_manage_edit_student")
+    if edit_target:
+        # find student object if possible
+        student = next((s for s in students if s.id == edit_target), None)
+        if student is None:
+            # fallback: try reloading students from store
+            students_all = store.get_students(class_id)
+            student = next((s for s in students_all if s.id == edit_target), None)
+
+        if student:
+            st.markdown(f"**正在修正：{student.name} 的成绩**")
+            rows = store.get_scores_by_student(student.id)
+            df = apply_exam_order(to_dataframe(rows), store, class_id)
+            if df.empty:
+                st.info("该学生当前没有可编辑的成绩记录。")
+            else:
+                # keep the same columns as before but ensure stable order
+                cols = ["id", "exam_name", "subject", "score", "score_raw", "rank", "total_score", "total_raw", "class_rank", "grade_rank"]
+                available = [c for c in cols if c in df.columns]
+                edit_df = df[available]
+
+                # display-friendly column names (中文)
+                col_display_map = {
+                    "id": "记录ID",
+                    "exam_name": "考试",
+                    "subject": "科目",
+                    "score": "得分",
+                    "score_raw": "原始得分",
+                    "rank": "排名",
+                    "total_score": "总分",
+                    "total_raw": "总分原始",
+                    "class_rank": "班级排名",
+                    "grade_rank": "年级排名",
+                }
+                display_map = {k: v for k, v in col_display_map.items() if k in edit_df.columns}
+                inv_map = {v: k for k, v in display_map.items()}
+
+                display_df = edit_df.rename(columns=display_map)
+                # Try to make certain columns read-only. Different Streamlit versions
+                # accept either ColumnConfig objects or simple dicts; build a plain dict
+                # and fall back to calling data_editor without column_config if unsupported.
+                column_config = {}
+                id_disp = display_map.get("id")
+                exam_disp = display_map.get("exam_name")
+                if id_disp and id_disp in display_df.columns:
+                    column_config[id_disp] = {"disabled": True}
+                if exam_disp and exam_disp in display_df.columns:
+                    column_config[exam_disp] = {"disabled": True}
+
+                if column_config:
+                    try:
+                        edited = st.data_editor(display_df, num_rows="fixed", column_config=column_config)
+                    except Exception:
+                        # some Streamlit versions expect different types; fall back
+                        edited = st.data_editor(display_df, num_rows="fixed")
+                else:
+                    edited = st.data_editor(display_df, num_rows="fixed")
+
+                # Save / Cancel buttons side by side
+                b1, b2 = st.columns([1, 1])
+                with b1:
+                    if st.button("保存修改", key=f"save_edit_{student.id}"):
+                        # rename columns back to original names for easy access
+                        back_df = edited.rename(columns=inv_map)
+                        for _, row in back_df.iterrows():
+                            sid = row.get("id")
+                            if pd.isna(sid):
+                                continue
+                            store.update_score_item(
+                                int(sid),
+                                float(row["score"]) if ("score" in back_df.columns and pd.notna(row.get("score"))) else None,
+                                float(row["score_raw"]) if ("score_raw" in back_df.columns and pd.notna(row.get("score_raw"))) else None,
+                                int(row["rank"]) if ("rank" in back_df.columns and pd.notna(row.get("rank"))) else None,
+                                float(row["total_score"]) if ("total_score" in back_df.columns and pd.notna(row.get("total_score"))) else None,
+                                float(row["total_raw"]) if ("total_raw" in back_df.columns and pd.notna(row.get("total_raw"))) else None,
+                                int(row["grade_rank"]) if ("grade_rank" in back_df.columns and pd.notna(row.get("grade_rank"))) else None,
+                                int(row["class_rank"]) if ("class_rank" in back_df.columns and pd.notna(row.get("class_rank"))) else None,
+                            )
+                        st.success("已保存。")
+                        # clear edit target after save
+                        st.session_state.pop("data_manage_edit_student", None)
+                        # refresh to reflect saved data
+                        st.rerun()
+                with b2:
+                    if st.button("取消", key=f"cancel_edit_{student.id}"):
+                        # simply clear the edit target and rerun without saving
+                        st.session_state.pop("data_manage_edit_student", None)
+                        st.rerun()
 
     st.markdown("**导出全量数据**")
     if st.button("导出（本软件可读）"):
