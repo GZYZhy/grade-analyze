@@ -23,7 +23,7 @@ from reporting import export_student_reports, export_stats_excel
 
 FORCED_RAW_SUBJECTS = {"语文", "数学", "英语", "物理", "历史"}
 
-APP_NAME = "成绩分析工具"
+APP_NAME = "1班成绩分析工具"
 APP_VERSION = "1.2"
 APP_AUTHOR = "公子语"
 APP_COPYRIGHT = "(c) 2026 ZhangWeb"
@@ -599,6 +599,42 @@ def render_trend_page(store: DataStore, class_id: int) -> None:
     if renamed_cols:
         exam_rows = exam_rows.rename(columns=renamed_cols)
     exam_rows = exam_rows.reset_index()
+
+    # 将内部索引列（exam_name）显示为中文列名，并按用户要求的精确顺序排列列。
+    # 保留 "考试名称"（如果存在）为首列，然后按下面的优先列表排序，最后把其余未列出的列追加在末尾。
+    if "exam_name" in exam_rows.columns:
+        exam_rows = exam_rows.rename(columns={"exam_name": "考试名称"})
+
+    existing_cols = list(exam_rows.columns)
+    desired_order = [
+        "考试名称",
+        "总分",
+        "总分原始",
+        "班级名次",
+        "年级名次",
+        "语文",
+        "数学",
+        "英语",
+        "物理",
+        "化学",
+        "化学赋分",
+        "生物",
+        "生物赋分",
+    ]
+
+    ordered_cols: List[str] = []
+    for col in desired_order:
+        if col in existing_cols and col not in ordered_cols:
+            ordered_cols.append(col)
+
+    # Append any remaining columns that weren't specified in desired_order, preserving their current order
+    for col in existing_cols:
+        if col not in ordered_cols:
+            ordered_cols.append(col)
+
+    # Reindex only if we have at least one column (safety)
+    if ordered_cols:
+        exam_rows = exam_rows.reindex(columns=ordered_cols)
 
     all_subjects = sorted([apply_subject_alias(s, aliases) for s in store.list_subjects(class_id) if s != "总分"])
     series_options_all = ["总分"] + list(dict.fromkeys(all_subjects))
