@@ -33,14 +33,15 @@ def init_page() -> None:
     st.markdown(
         """
         <style>
-        .block-container { padding-top: 1.2rem; padding-bottom: 1.5rem; }
+        .block-container { padding-top: 4.2rem; padding-bottom: 1.5rem; }
         div[data-testid="stVerticalBlock"] > div { gap: 0.6rem; }
+        .app-header { margin-top: 0.2rem; margin-bottom: 0rem; }
         </style>
         """,
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"<div style='font-size:16px; font-weight:600'>{APP_NAME}"
+        f"<div class='app-header' style='font-size:16px; font-weight:600'>{APP_NAME}"
         f"<span style='font-weight:400; color:#6b7280; margin-left:12px;'>"
         f"版本 {APP_VERSION} · 作者 {APP_AUTHOR} · 版权 {APP_COPYRIGHT}"
         f"</span></div>",
@@ -340,6 +341,14 @@ def render_trend_page(store: DataStore, class_id: int) -> None:
     if "trend_total_rank_source" not in st.session_state:
         st.session_state["trend_total_rank_source"] = "年级排名"
 
+    if st.session_state.get("trend_autoplay"):
+        st_autorefresh(interval=st.session_state.get("trend_interval", 6) * 1000, key="autoplay")
+        st.session_state["slide_index"] = (st.session_state["slide_index"] + 1) % len(names)
+    else:
+        st_autorefresh(interval=24 * 60 * 60 * 1000, key="autoplay")
+
+    selected = st.selectbox("选择学生", names, index=st.session_state["slide_index"])
+
     components.html(
         """
         <script>
@@ -356,14 +365,6 @@ def render_trend_page(store: DataStore, class_id: int) -> None:
         height=0,
     )
 
-    if st.session_state.get("trend_autoplay"):
-        st_autorefresh(interval=st.session_state.get("trend_interval", 6) * 1000, key="autoplay")
-        st.session_state["slide_index"] = (st.session_state["slide_index"] + 1) % len(names)
-    else:
-        st_autorefresh(interval=24 * 60 * 60 * 1000, key="autoplay")
-
-    selected = st.selectbox("选择学生", names, index=st.session_state["slide_index"])
-
     student = next(s for s in students if s.name == selected)
     rows = store.get_scores_by_student(student.id)
     df = to_dataframe(rows)
@@ -375,7 +376,6 @@ def render_trend_page(store: DataStore, class_id: int) -> None:
     df = normalize_forced_subjects(df)
     trend = build_student_trend(df)
 
-    st.markdown(f"<div style='font-size:20px; font-weight:600'>{selected}</div>", unsafe_allow_html=True)
     tab_chart, tab_table, tab_settings = st.tabs(["图表", "表格", "设置"])
 
     df_display = df.copy()
