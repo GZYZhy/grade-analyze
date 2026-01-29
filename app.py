@@ -33,9 +33,12 @@ def init_page() -> None:
     st.markdown(
         """
         <style>
-        .block-container { padding-top: 4.2rem; padding-bottom: 1.5rem; }
-        div[data-testid="stVerticalBlock"] > div { gap: 0.6rem; }
-        .app-header { margin-top: 0.2rem; margin-bottom: 0rem; }
+        .block-container { padding-top: 2.4rem; padding-bottom: 1rem; }
+        div[data-testid="stVerticalBlock"] > div { gap: 0.15rem; }
+        .app-header { margin-top: 0.05rem; margin-bottom: 0rem; }
+        div[data-testid="stSelectbox"] { margin-bottom: -0.35rem; }
+        div[data-testid="stSelectbox"] label { margin-bottom: 0.1rem; }
+        div[data-testid="stTabs"] { margin-top: -0.7rem; }
         </style>
         """,
         unsafe_allow_html=True,
